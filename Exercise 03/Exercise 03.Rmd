@@ -1,0 +1,500 @@
+---
+title: "Execise 03"
+output:
+  html_document:
+    df_print: paged
+  github_document: default
+  md_document: default
+  pdf_document:
+    latex_engine: xelatex
+date: "2024-04-02"
+geometry: margin=1in
+---
+
+
+# Initialisation of libraries and dataset
+
+## Import Libraries
+
+```{r Setup}
+knitr::opts_chunk$set(tidy.opts=list(width.cutoff=60), format='latex', echo=TRUE)
+library(tidyverse)
+library(lubridate)
+#install.packages('arrow', repos = c('https://apache.r-universe.dev'))
+library(arrow)
+```
+
+## Import Dataset
+
+```{r Import Dataset}
+data_path <- "/Users/yuyichen/Desktop/Winter 2024/ORGB - 672/2024-ona-assignments/app_data_sample.parquet" # change this to your path
+applications <- arrow::read_parquet(data_path)
+```
+
+
+```{r}
+#install.packages("wru")
+options(repos = c(CRAN = "https://cloud.r-project.org"))
+
+```
+
+# Processing of dataset to include gender and race for examiners
+
+## Adding gender.y to dataset based on surnames library
+```{r Gender-related processing}
+install.packages("gender")
+library(gender)
+library(githubinstall)
+install.packages("remotes")
+library(remotes)
+
+```
+
+```{r}
+# get a list of first names without repetitions
+library(gender)
+
+# get a list of first names without repetitions
+examiner_names <- applications %>% 
+  distinct(examiner_name_first)
+
+
+examiner_names_gender <- examiner_names %>% 
+  do(results = gender(.$examiner_name_first, method = "ssa")) %>% 
+  unnest(cols = c(results), keep_empty = TRUE) %>% 
+  select(
+    examiner_name_first = name,
+    gender,
+    proportion_female
+  )
+
+examiner_names_gender
+
+gc()
+```
+
+```{r Gender}
+
+# remove extra colums from the gender table
+examiner_names_gender <- examiner_names_gender %>% 
+  select(examiner_name_first, gender)
+
+# joining gender back to the dataset
+applications <- applications %>% 
+  left_join(examiner_names_gender, by = "examiner_name_first")
+
+# cleaning up
+rm(examiner_names)
+rm(examiner_names_gender)
+gc()
+```
+
+
+
+## Adding race.y to dataset using surnames library
+```{r Race-related processing}
+library(wru)
+
+examiner_surnames <- applications %>% 
+  select(surname = examiner_name_last) %>% 
+  distinct()
+
+
+examiner_race <- predict_race(voter.file = examiner_surnames, surname.only = T) %>% 
+  as_tibble()
+
+examiner_race <- examiner_race %>% 
+  mutate(max_race_p = pmax(pred.asi, pred.bla, pred.his, pred.oth, pred.whi)) %>% 
+  mutate(race = case_when(
+    max_race_p == pred.asi ~ "Asian",
+    max_race_p == pred.bla ~ "black",
+    max_race_p == pred.his ~ "Hispanic",
+    max_race_p == pred.oth ~ "other",
+    max_race_p == pred.whi ~ "white",
+    TRUE ~ NA_character_
+  ))
+
+
+examiner_race <- examiner_race %>% 
+  select(surname,race)
+
+applications <- applications %>% 
+  left_join(examiner_race, by = c("examiner_name_last" = "surname"))
+
+rm(examiner_race)
+rm(examiner_surnames)
+gc()
+```
+## Adding dates-related data to calculate tenure days 
+```{r Dates-related processing}
+library(lubridate) # to work with dates
+
+examiner_dates <- applications %>% 
+  select(examiner_id, filing_date, appl_status_date) 
+examiner_dates <- examiner_dates %>% 
+  mutate(start_date = ymd(filing_date), end_date = as_date(dmy_hms(appl_status_date)))
+
+examiner_dates <- examiner_dates %>% 
+  group_by(examiner_id) %>% 
+  summarise(
+    earliest_date = min(start_date, na.rm = TRUE), 
+    latest_date = max(end_date, na.rm = TRUE),
+    tenure_days = interval(earliest_date, latest_date) %/% days(1)
+    ) %>% 
+  filter(year(latest_date)<2018)
+applications <- applications %>% 
+  left_join(examiner_dates, by = "examiner_id")
+
+rm(examiner_dates)
+gc()
+```
+
+# Creating panel data
+
+## Cleaning noisy data
+
+```{r Cleaning noisy data 1}
+library(dplyr)
+
+# Assuming 'applications' is the correct dataframe and includes the 'gender' column as listed
+distinct_dataset <- applications %>%
+  select(examiner_art_unit, examiner_id, gender, race, tenure_days) %>%
+  distinct()
+distinct_dataset <- distinct_dataset %>%
+  mutate(first_three_digits = str_sub(examiner_art_unit, 1, 3))
+```
+
+## Select Workgroup 172 and 173
+
+```{r}
+filtered_df <- distinct_dataset %>%
+  filter(str_sub(examiner_art_unit, 1, 3) %in% c("172", "173"))
+
+```
+
+### Statistics Summary of Workgroup
+
+```{r}
+# Summary statistics for tenure
+tenure_summary <- filtered_df %>%
+  group_by(workgroup = str_sub(examiner_art_unit, 1, 3)) %>%
+  summarise(
+    count = n(),
+    mean_tenure = mean(tenure_days, na.rm = TRUE),
+    sd_tenure = sd(tenure_days, na.rm = TRUE),
+    min_tenure = min(tenure_days, na.rm = TRUE),
+    max_tenure = max(tenure_days, na.rm = TRUE)
+  )
+
+print(tenure_summary)
+
+# Frequency tables for gender and race
+gender_table <- table(filtered_df$first_three_digits, filtered_df$gender)
+race_table <- table(filtered_df$first_three_digits, filtered_df$race)
+
+print(gender_table)
+print(race_table)
+```
+
+### Gender Distribution
+
+According to the frequency table for gender, Workgroup '172' consists of 252 examiners, with a male to female ratio of approximately 2:1 (168 males to 84 females). Workgroup '173' comprises 212 examiners and also displays a similar gender ratio. The significant gender disparity favoring male employees over female employees is consistent across both workgroups, as illustrated by the bar chart.
+
+### Racial Composition
+
+As the frequency table for race shows, in workgroup '172', there are more white employees (216) than all other racial categories combined (70). Workgroup '173' has a similar racial makeup, with white employees (173) outnumbering other racial groups. The bar chart representing the proportion of white employees showcases that workgroup '172' and '173' have higher percentages of white employees compared to the 'Other' group.
+
+
+### Visual Statistics of "Male" and "White" resepctively from the 172 and 173 Group
+```{r}
+library(dplyr)
+library(stringr)
+
+distinct_dataset <- distinct_dataset %>%
+  mutate(group = case_when(
+    str_sub(examiner_art_unit, 1, 3) == "171" ~ "172",
+    str_sub(examiner_art_unit, 1, 3) == "172" ~ "173",
+    TRUE ~ "Other"
+  ))
+
+# Proportion of male employees
+female_prop <- distinct_dataset %>%
+  group_by(group) %>%
+  summarise(male_count = sum(gender == "male", na.rm = TRUE),
+            total_count = n(),
+            prop_male = male_count / total_count)
+
+# Proportion of white employees
+white_prop <- distinct_dataset %>%
+  group_by(group) %>%
+  summarise(white_count = sum(race == "white", na.rm = TRUE),
+            total_count = n(),
+            prop_white = white_count / total_count)
+
+print(female_prop)
+print(white_prop)
+
+```
+
+### Visualize Tenure by Workroup
+
+
+```{r}
+library(ggplot2)
+
+# Boxplot for tenure by workgroup
+ggplot(distinct_dataset, aes(x = group, y = tenure_days, fill = group)) +
+  geom_boxplot() +
+  labs(x = "Workgroup", y = "Tenure", title = "Tenure by Workgroup") +
+  theme_minimal()
+
+```
+
+### Tenture Analysis
+
+Workgroup '172' has 286 members with an average tenure of approximately 5107 days and a standard deviation of about 1436 days. This indicates a tenure range from 435 days to 6350 days, suggesting a mix of relatively new and very experienced employees.
+
+Workgroup '173' has 235 members with a higher average tenure of approximately 5310 days, and a standard deviation of about 1300 days, indicating a somewhat less varied length of service compared to '172'. The minimum and maximum tenures span from 251 days to 6391 days, again highlighting a range from newer to highly tenured individuals.
+
+The tenure distribution box plot visualizes this data and suggests that while both workgroups '172' and '173' have experienced workforces, workgroup '173' has, on average, slightly more tenured individuals. The less varied tenure (lower standard deviation) in '173' could imply more consistent employment durations within that group.
+
+
+### Visualize Proportion of Male Employees by Workgroup 
+
+```{r}
+df_prop <- distinct_dataset %>%
+  group_by(group) %>%
+  summarise(total_count = n(), # Total employees in each group
+            male_count = sum(gender == "male", na.rm = TRUE)) %>%
+  mutate(proportion_male = male_count / total_count) %>%
+  select(group, proportion_male)
+
+
+ggplot(df_prop, aes(x = group, y = proportion_male, fill = group)) +
+  geom_col() + # geom_col is equivalent to geom_bar(stat = "identity") but more intuitive for this use case
+  scale_y_continuous(labels = scales::percent_format()) +
+  labs(x = "Group", y = "Proportion of Male Employees", title = "Proportion of Male Employees by Group") +
+  theme_minimal() +
+  theme(legend.title = element_blank())
+```
+
+
+### Visualize Proportion of White Employees by Group 
+
+```{r}
+df_prop <- distinct_dataset %>%
+  group_by(group) %>%
+  summarise(total_count = n(), # Total employees in each group
+            white_count = sum(race == "white", na.rm = TRUE)) %>%
+  mutate(proportion_white = white_count / total_count) %>%
+  select(group, proportion_white)
+
+
+ggplot(df_prop, aes(x = group, y = proportion_white, fill = group)) +
+  geom_col() + # geom_col is equivalent to geom_bar(stat = "identity") but more intuitive for this use case
+  scale_y_continuous(labels = scales::percent_format()) +
+  labs(x = "Group", y = "Proportion of White Employees", title = "Proportion of White Employees by Group") +
+  theme_minimal() +
+  theme(legend.title = element_blank())
+```
+
+### Conclusions
+
+The analysis suggests that workgroups '172' and '173' not only exhibit disparities in gender and racial demographics but also show differences in tenure distributions. Both groups are male-dominated and primarily composed of white employees, with '173' showing a slightly higher average tenure than '172'. The distribution of tenure indicates a workforce with a range of experiences, from newer employees to those with many years of service. This diversity in tenure could be beneficial for fostering a workplace that balances fresh perspectives with institutional knowledge.
+
+
+### Network Graph Building
+
+```{r}
+edges_sample <- read_csv("/Users/yuyichen/Desktop/Winter 2024/ORGB - 672/2024-ona-assignments/edges_sample.csv")
+filtered_examiners <- distinct_dataset %>%
+  filter(group %in% c("172","173"))
+```
+### Building Network Graph for Workgroup 172 and 173
+```{r}
+library(igraph)
+library(readr)
+edges_for_network <- edges_sample %>%
+  filter(ego_examiner_id %in% filtered_examiners$examiner_id | alter_examiner_id %in% filtered_examiners$examiner_id)
+network <- graph_from_data_frame(edges_for_network, directed = TRUE)
+
+
+library(visNetwork)
+visNetwork::visIgraph(network)
+```
+
+### Network Graph Analysis for Workgroups 172 and 173
+
+#### Clustering Patterns
+
+The network graph shows distinct clusters, indicating that within both workgroups, there are subgroups where members interact more intensively with each other. This suggests the presence of homophily, where shared characteristics or job functions might lead to tighter bonds within these clusters.
+
+#### Central Nodes as Influencers
+
+Noticeably, certain nodes serve as central hubs with numerous connections. In workgroup 172, if these hubs are scattered throughout the network, it could point to a decentralized structure with shared leadership and collaborative influence. In contrast, if workgroup 173's central nodes create a tight core, it may indicate a conventional hierarchy where a few individuals hold most of the influence.
+
+#### Peripheral Engagement
+
+On the graph's edges, nodes with sparse connections likely represent individuals in peripheral roles within the workgroups. These members may be less integrated into the main workflow, potentially due to the newness to the group, specialized job functions, or lower requirements for collaborative interaction.
+
+#### Bridging Figures
+
+Nodes situated between clusters may represent key connectors, bridging different subgroups within the workgroups. For workgroup 172, this could be emblematic of cross-functional collaboration, suggesting a fluid exchange of ideas and resources. For workgroup 173, such nodes might be essential for communication across more siloed departments.
+
+#### Isolation and Integration
+
+Isolated nodes, or those with minimal connections, stand out as atypical within the network. They could be remote workers, new hires, or individuals whose roles are isolated by nature. Their positioning warrants attention to ensure they're not inadvertently excluded from vital communication channels.
+
+#### Conclusion on the Network Analysis
+
+This graph analysis illuminates the  social fabric within the workgroups. It underscores diverse degrees of collaboration and communication, with central figures, connectors, and isolated nodes each playing distinct roles. For organizational development, these insights are invaluable, directing focus toward enhancing the integration of peripheral members, supporting the roles of central influencers, and optimizing the bridging capabilities between clusters to achieve a harmonious and efficient network ecosystem.
+
+### The Centrality Measure - Closeness Centrality
+
+Centrality Measure Justification: Closeness centrality is utilized in the analysis as it quantitatively captures the average distance of an individual to all others in the network, which offers a measure of how integrated or central an individual is within the broader organizational structure.
+
+### Calculation of CLoseness centrality for Workgroup 172 only
+
+```{r only for workgroup 172}
+filtered_172_df <- distinct_dataset %>%
+  filter(str_sub(examiner_art_unit, 1, 3) %in% c("172"))
+```
+
+
+### The Average Closeness Centrality by Gender for Workgroup 172
+```{r}
+# Calculation of closeness centrality for 172
+closeness_centrality <- closeness(network, mode = "out")
+centrality_scores <- data.frame(examiner_id = V(network)$name, 
+                                closeness_centrality = closeness_centrality) %>%
+  mutate(examiner_id = as.numeric(examiner_id))
+
+# Join the centrality scores with the filtered dataset for workgroup 172
+final_dataset_172 <- filtered_172_df %>%
+  left_join(centrality_scores, by = "examiner_id")
+
+# Calculate the average closeness centrality by gender for workgroup 172
+average_by_gender_172 <- final_dataset_172 %>%
+  group_by(gender) %>%
+  summarise(average_closeness_centrality = mean(closeness_centrality, na.rm = TRUE))
+
+# Display the table
+print(average_by_gender_172)
+
+```
+
+
+### The Average Closeness Centrality by Race for Workgroup 172
+```{r}
+
+average_by_race_172 <- final_dataset_172 %>%
+  group_by(race) %>%
+  summarise(average_closeness_centrality = mean(closeness_centrality, na.rm = TRUE))
+print(average_by_race_172)
+
+```
+
+### The Average Closeness Centrality by Tenture Category for Workgroup 172
+
+```{r}
+library(dplyr)
+# Define bins for tenure days. Adjust the breaks as needed for your dataset.
+tenure_bins <- c(0, 365, 730, 1095, 1460, Inf) # Example bins: <1 year, 1-2 years, 2-3 years, 3-4 years, >4 years
+labels <- c("<1 year", "1-2 years", "2-3 years", "3-4 years", ">4 years") # Labels for the bins
+
+# Create a new column for tenure categories in the filtered_172_df dataframe
+final_dataset_172 <- final_dataset_172 %>%
+  mutate(tenure_category = cut(tenure_days, breaks = tenure_bins, labels = labels, right = FALSE))
+
+# Calculate average closeness centrality score grouped by tenure category for workgroup 172
+average_by_tenure_category_172 <- final_dataset_172 %>%
+  group_by(tenure_category) %>%
+  summarise(average_closeness_centrality = mean(closeness_centrality, na.rm = TRUE))
+
+# Display the table
+print(average_by_tenure_category_172)
+
+```
+### Calculation of CLoseness centrality for Workgroup 172 only
+
+```{r only for workgroup 173}
+filtered_173_df <- distinct_dataset %>%
+  filter(str_sub(examiner_art_unit, 1, 3) %in% c("173"))
+```
+
+### The Average Closeness Centrality by Gender for Workgroup 173
+
+```{r}
+
+# Calculation of closeness centrality
+closeness_centrality <- closeness(network, mode = "out")
+centrality_scores <- data.frame(examiner_id = V(network)$name, 
+                                closeness_centrality = closeness_centrality) %>%
+  mutate(examiner_id = as.numeric(examiner_id))
+
+# Join the centrality scores with the filtered dataset for workgroup 172
+final_dataset_173 <- filtered_173_df %>%
+  left_join(centrality_scores, by = "examiner_id")
+
+# Calculate the average closeness centrality by gender for workgroup 172
+average_by_gender_173 <- final_dataset_173 %>%
+  group_by(gender) %>%
+  summarise(average_closeness_centrality = mean(closeness_centrality, na.rm = TRUE))
+
+# Display the table
+print(average_by_gender_173)
+
+```
+
+
+### The Average Closeness Centrality by Race for Workgroup 173
+```{r}
+average_by_race_173 <- final_dataset_173 %>%
+  group_by(race) %>%
+  summarise(average_closeness_centrality = mean(closeness_centrality, na.rm = TRUE))
+print(average_by_race_173)
+
+```
+
+### The Average Closeness Centrality by Tenture Category for Workgroup 173
+
+```{r}
+library(dplyr)
+# Define bins for tenure days. Adjust the breaks as needed for your dataset.
+tenure_bins <- c(0, 365, 730, 1095, 1460, Inf) # Example bins: <1 year, 1-2 years, 2-3 years, 3-4 years, >4 years
+labels <- c("<1 year", "1-2 years", "2-3 years", "3-4 years", ">4 years") # Labels for the bins
+
+# Create a new column for tenure categories in the filtered_172_df dataframe
+final_dataset_173 <- final_dataset_173 %>%
+  mutate(tenure_category = cut(tenure_days, breaks = tenure_bins, labels = labels, right = FALSE))
+
+# Calculate average closeness centrality score grouped by tenure category for workgroup 172
+average_by_tenure_category_173 <- final_dataset_173 %>%
+  group_by(tenure_category) %>%
+  summarise(average_closeness_centrality = mean(closeness_centrality, na.rm = TRUE))
+
+# Display the table
+print(average_by_tenure_category_173)
+
+```
+
+### Relationship Analysis
+
+#### Gender-Based Centrality in Workgroups: 
+
+Analysis of workgroup '172' reveals a subtle gender influence on centrality, with female examiners marginally more central than their male counterparts. This suggests the presence of gender homophily—women might be leveraging their connections within the group for support and collaboration in a subtly different way than men. In workgroup '173', a more pronounced centrality among male examiners indicates disparate networking behaviors or opportunities that can be linked to gender.
+
+#### Race and Centrality Dynamics: 
+
+Race distinctly affects network centrality in both workgroups. Workgroup '172' shows Hispanic examiners with high centrality, hinting at a robust intra-racial network that possibly extends to influential roles in that networking. This central positioning within the network can be a conduit for enhanced knowledge exchange and integration across racial lines. On the other hand, Asian examiners in workgroup '173' emerge as central figures, potentially indicating their role in bridging diverse groups, aligning with a network structure that fosters innovation and cross-cultural connections.
+
+#### Tenure's Relationship with Network Centrality: 
+
+In both workgroups, tenure correlates with centrality. Longer-tenured examiners exhibit a greater centrality, implying a deepened network involvement over time and a shift towards integral roles within the organization’s network. The absence of centrality data for less tenured examiners raises questions about their network integration phase or possible limitations in the data collection process. This trend suggests that career progression is accompanied by an expanding influence in the network, where seasoned examiners facilitate interconnectedness and cohesion.
+
+#### Synthesis of Centrality and Examiner Characteristics: 
+
+Overall, the centrality within these workgroups is subtly shaped by gender, race, and tenure, each contributing to the network in unique ways. Gender differences are slight but indicative of distinct networking strategies. Racial composition profoundly influences the network, with specific racial groups assuming central roles that shape the network's information flow and social structure. Tenure demonstrates a clear evolution in networking influence, underscoring the importance of career development in shaping an examiner’s role in the organizational network. Understanding these dynamics is key for organizational leadership to foster a well-integrated, collaborative, and supportive work environment that leverages the strengths of its diverse membership.
+
+
+
